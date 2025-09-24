@@ -1,0 +1,824 @@
+import streamlit as st
+import requests
+from collections import defaultdict 
+import folium
+from streamlit_folium import st_folium
+import pandas as pd
+import plotly.express as px
+import matplotlib.pyplot as plt
+import math
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.neighbors import KNeighborsClassifier
+from datetime import time
+import seaborn as sns
+import os
+
+
+# Set your Yelp API key here
+API_KEY = "vpyO5Jy8MsflR73j0jSFrkpOKLaS1zDoqaYBKcwZ4h_EX94LyC-KnYyerSbOSYylXDKg652HpNQ0_KjLqA4xnEhR9z3fvcmf0WEF1WooIO1P1deTGAayMLsxgg5XZ3Yx"
+# Yelp API endpoints
+API_URL = "https://api.yelp.com/v3/businesses/search"
+
+# Function to fetch businesses from Yelp API
+def get_yelp_businesses(location, term="restaurants"):
+    headers = {
+        'Authorization': f'Bearer {API_KEY}'
+    }
+    params = {
+        'term': term,  # See default parameter (in function principle)
+        'location': location,  # To be searched
+        'limit': 50  # NOTE - This needs to be maximized (limit on API)
+    }
+    
+    response = requests.get(API_URL, headers=headers, params=params)
+    
+    if response.status_code == 200:
+        return response.json()['businesses']
+    else:
+        st.error("Failed to fetch data from Yelp.")
+        return []
+    
+# Function to fetch businesses from Yelp API by coordinates
+def get_yelp_businesses_by_coordinates(lat, lon, term="restaurants"):
+    headers = {
+        'Authorization': f'Bearer {API_KEY}'
+    }
+    params = {
+        'term': term,
+        'latitude': lat,
+        'longitude': lon,
+        'limit': 50
+    }
+    response = requests.get(API_URL, headers=headers, params=params)
+    if response.status_code == 200:
+        return response.json().get('businesses', [])
+    else:
+        st.error("Failed to fetch data from Yelp.")
+        return []
+    
+
+# Function to calculate euclidian distance and convert to meters
+def calculate_distance_in_meters(lat1, lon1, lat2, lon2):
+    # Approximate conversion factor for degrees to meters at the equator
+    DEGREE_TO_METERS = 111_320
+    distance = math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2)
+    return distance * DEGREE_TO_METERS
+
+
+def display_business_hours(business):
+    # Access the 'business_hours' dictionary from the response
+    business_hours = business.get('business_hours', 'Not Available')
+    
+    if not business_hours or "open" not in business_hours[0]:
+        st.write('No business hours available.')
+        return
+    
+    # Prepare the data for the dataframe
+    hours_data = []
+    for entry in business_hours[0]['open']:
+        day_map = {
+            0: 'Sunday', 1: 'Monday', 2: 'Tuesday', 3: 'Wednesday', 4: 'Thursday', 5: 'Friday', 6: 'Saturday'
+        }
+        day_name = day_map.get(entry['day'])
+        start_time = f"{entry['start'][:2]}:{entry['start'][2:]}"
+        end_time = f"{entry['end'][:2]}:{entry['end'][2:]}"
+        hours_data.append([day_name, start_time, end_time])
+
+    # Create a DataFrame for a clean calendar-like output
+    df = pd.DataFrame(hours_data, columns=['Day', 'Opening Time', 'Closing Time'])
+
+    # Display the table in Streamlit
+    st.write(df)
+
+
+#### SIDEBAR
+st.sidebar.image("https://i.postimg.cc/k4BCdcnH/LOGO.png")  #use_container_width=True)  # Updated to use use_container_width DOES NOT WORK
+st.sidebar.write("## Find the best restaurants near you!")
+st.sidebar.write('''
+    ## About LetsGoEat
+    Whether you're looking for a place to eat, or you're trying to find 
+    a restaurant for two people to meet, your first stop is LetsGoEat!
+
+    ## Where to go:
+''')
+Options = st.sidebar.radio("Choose your preferred interface:", ('Individual', 'Duo Mode', "Find Tonight's Cuisine!"))
+
+######## INDIVIDUAL INTERFACE PAGE #########
+if Options == 'Individual':
+    st.image(r'https://i.postimg.cc/k4BCdcnH/LOGO.png')
+    st.title("Individual Mode")
+    st.write("Eating Solo? Find your Restaurant!!")
+    
+    ## INPUT SECTION
+    st.markdown("---")
+    st.header("Please Select Your Preferences")
+    st.markdown("---")
+    
+    ####### Location
+    location_pref = st.radio("How would you like to enter your location", ("I'm specific - I'll input coordinates", "Let me enter Location Name"), index=1)
+    if location_pref == "Let me enter Location Name":
+        location = st.text_input("Enter location:")    
+    
+    if location_pref == "I'm specific - I'll input coordinates":
+        location = st.text_input("Enter your location (latitude,longitude):", "")  # No default value
+        if location:
+            try:
+                lat, lon = map(float, location.split(","))
+                st.write(f"Searching for restaurants near ({lat}, {lon})...")
+                
+                # Fetch businesses by coordinates
+                businesses = get_yelp_businesses_by_coordinates(lat, lon)
+                
+                if businesses:
+                    # Create a DataFrame for filtering
+                    df = pd.DataFrame([
+                        {
+                            "Name": business["name"],
+                            "Latitude": business["coordinates"].get("latitude"),
+                            "Longitude": business["coordinates"].get("longitude"),
+                            "Rating": business["rating"],
+                            "Review Count": business.get("review_count", 0),
+                            "Price": business.get("price", "N/A"),
+                        }
+                        for business in businesses
+                        if business["coordinates"].get("latitude") and business["coordinates"].get("longitude")
+                    ])
+
+                    # Add distance calculation to DataFrame
+                    distance_calc = df["Distance (m)"] = df.apply(
+                        lambda row: calculate_distance_in_meters(lat, lon, row["Latitude"], row["Longitude"]),
+                        axis=1
+                    )
+
+                    # Adjust max_distance slider for precise values in meters
+                    max_distance_meters = st.slider(
+                        "Select maximum distance (in meters):",
+                        0, int(df["Distance (m)"].max()) + 100, 500, step=10  # Adjust range based on actual distances
+                    )
+                    st.write("---")
+
+                    # Filter by distance
+                    filtered_by_distance = df[df["Distance (m)"] <= max_distance_meters]
+
+                
+                else:
+                    st.warning("No restaurants found.")
+            except ValueError:
+                st.error("Invalid input format. Please enter valid latitude and longitude values separated by a comma.")
+        
+    
+    
+    
+    
+    
+    if location:
+        businesses = get_yelp_businesses(location)    
+    
+    ## Rating
+    st.write("""Choose Your Preferred Star Rating Range:""")
+    min_rating, max_rating = st.slider ("""NOTE that we won't provide you with restaurants rated less than 4, 
+                                        so you choose how perfect you want to be!!)""",
+                            4.0, 5.0, (4.0, 5.0), step = 0.1)
+    st.markdown("---")
+    ## Price
+    prices_selected = st.multiselect("Select Price Levels",
+                                    options=["$", "$$", "$$$", "$$$$", "Not Available"],
+                                    default=["$", "$$", "$$$", "$$$$", "Not Available"])
+    st.markdown("---")
+    ## Categories
+
+    # Filtering and Display 
+    if location:
+        businesses = get_yelp_businesses(location)
+
+        if businesses:
+            # Extract all unique categories across the businesses
+            all_categories = set()
+            for business in businesses:
+                for category in business.get('categories', []):
+                    all_categories.add(category['title'])
+            
+
+            # Let the user select multiple categories to filter by
+            all_cat = st.radio("How would you like to filter?:", ("All Categories", "Let Me Select My Own"))
+            if all_cat == "All Categories":
+                    categories_selected = list(all_categories) 
+                    st.write("Not sure what to eat? try our 'Find Tonight's Cuisine' Option (see the sidebar)")
+            elif all_cat == "Let Me Select My Own":  
+                categories_selected = st.multiselect(
+                    "Select Categories",
+                    options=list(all_categories),
+                    default=list()
+                )
+            
+            # Filter the businesses based on selected categories and price
+            business_filtered = [
+                business for business in businesses
+                if min_rating <= business['rating'] <= max_rating
+                and (
+                    business.get('price', '') in prices_selected
+                    or "Not Available" in prices_selected and business.get('price', '') == ''
+                )
+                and any(category in categories_selected for category in [cat['title'] for cat in business.get('categories', [])])
+            ]
+            
+            # SORTING the businesses based on user preference
+             ## Sort Order - Add sorting preference
+            st.markdown("---")
+            sort_order = st.selectbox("What would you like to Prioritize?:", ("Price (cheapest first)", "Star Rating (highest first)",
+                                                                              "distance (nearest first)"))
+
+            if sort_order == "Price (cheapest first)":
+                sorted_businesses = sorted(business_filtered, key=lambda x: len(x.get('price', '')), reverse=False)
+            elif sort_order == "Star Rating (highest first)":
+                sorted_businesses = sorted(business_filtered, key=lambda x: x['rating'], reverse=True)
+                sort_review = st.radio("Would you also like to Sort by Review Count?:", ("Yes", "No"))
+                if sort_review == "Yes":
+                    sorted_businesses = sorted(
+                        business_filtered,
+                        key=lambda x: (x['rating'], x.get('review_count', 0)),
+                        reverse=True  # Descending for both rating and review count
+                    )
+            if sort_order == "distance (nearest first)":
+                if location_pref == "I'm specific - I'll input coordinates" and location:
+                    try:
+                        # Ensure distance is calculated for all businesses in `business_filtered`
+                        for business in business_filtered:
+                            business_lat = business["coordinates"]["latitude"]
+                            business_lon = business["coordinates"]["longitude"]
+                            business["distance"] = calculate_distance_in_meters(lat, lon, business_lat, business_lon)
+
+                        # Sort businesses by the calculated distance
+                        sorted_businesses = sorted(
+                            business_filtered,
+                            key=lambda x: x.get("distance", float("inf")),  # Fallback for missing distance
+                            reverse=False  # Nearest first
+                        )
+                    except KeyError as e:
+                        st.error(f"Missing key in business data: {e}")
+                else:
+                    st.warning("Sorting by distance requires specific coordinates. Please enable the 'I'm specific - I'll input coordinates' option.")
+            st.write('---')
+
+
+    ####### ADDING MAP FEATURE #########
+            show_map = st.radio(f'Would you like to see a map of results near {location}?', ("Yes", "No"), index=1)
+            # MAP FOR CO-ORDINATES
+            if show_map == "Yes" and location and location_pref == "I'm specific - I'll input coordinates": 
+                if sorted_businesses:  
+                    st.dataframe(filtered_by_distance[["Name", "Rating", "Review Count", "Price", "Distance (m)"]])
+        
+                    # Map visualization
+                    st.write(f"### Map of Restaurants within {max_distance_meters} meters of your location:")
+                    map_center = [lat, lon]
+                    mymap = folium.Map(location=map_center, zoom_start=16, tiles="CartoDB positron")
+                    
+                    # Add user location marker
+                    folium.Marker(
+                        location=[lat, lon],
+                        popup="Your Location",
+                        icon=folium.Icon(color="blue", icon="user"),
+                    ).add_to(mymap)
+
+                    # Add nearby restaurant markers
+                    for _, row in filtered_by_distance.iterrows():
+                        folium.Marker(
+                            location=[row["Latitude"], row["Longitude"]],
+                            popup=f"{row['Name']} (Rating: {row['Rating']}, Distance: {row['Distance (m)']:.2f} m)",
+                            icon=folium.Icon(color="green", icon="cutlery"),
+                        ).add_to(mymap)
+
+                    # Display the map
+                    st_folium(mymap, width=700, height=500)   
+                else: 
+                    st.write("No restaurants found.")
+
+       
+           # MAP FOR LOCATION NAME
+            if show_map == "Yes" and location and location_pref == "Let me enter Location Name":
+                if sorted_businesses:
+                    st.write("**Restaurants found:**")
+                    first_business = sorted_businesses[0]
+                    map_center = [first_business['coordinates']['latitude'], first_business['coordinates']['longitude']]
+                    mymap = folium.Map(location=map_center, zoom_start=13)
+
+                    for business in sorted_businesses:
+                        name = business['name']
+                        lat = business.get('coordinates', {}).get('latitude', 0)
+                        lon = business.get('coordinates', {}).get('longitude', 0)
+                        folium.Marker(location=[lat, lon], popup=name).add_to(mymap)
+                        marker_icon = folium.Icon(color='red',icon='cutlery', prefix='fa')
+                        folium.Marker(
+                location=[lat, lon],
+                popup=folium.Popup(f"<b>{name}</b>", max_width=200),  # Customize the popup
+                icon=marker_icon
+            ).add_to(mymap)
+                        
+                    st_folium(mymap, width=700, height=500)
+                else:
+                    st.write("No restaurants found.")
+
+            
+            
+            #### VISUALIZATIONS  ######
+            st.write("---")
+            st.title("Here's a quick Statistical Summary of Your Selection")
+           
+            # Pie Chart for Category Distribution by city
+            if sorted_businesses:
+                category_counts = defaultdict(int)
+                for business in sorted_businesses:
+                    for category in business.get("categories", []):
+                        category_counts[category["title"]] += 1
+
+                category_df = pd.DataFrame(
+                    {"Category": list(category_counts.keys()), "Count": list(category_counts.values())}
+                )
+                # Total count to find percentages
+                total_count = category_df["Count"].sum()
+                category_df["Percentage"] = (category_df["Count"] / total_count) * 100
+                # Group categories smaller than 2% into "Others"
+                category_df["Category"] = category_df.apply(lambda row: "Others" if row["Percentage"] < 2 else row["Category"], axis=1)
+                category_df = category_df.groupby("Category", as_index=False).agg({"Count": "sum"})
+               
+                if not category_df.empty:
+                    fig = px.pie(
+                        category_df,
+                        values="Count",
+                        names="Category",
+                        title="Category Distribution",
+                        hole=0.4
+                    )
+                    st.markdown("---")
+                    st.header("Category Distribution by City")
+                    st.plotly_chart(fig)
+
+            # Histogram for Ratings Distribution
+            if sorted_businesses:
+                ratings = [business["rating"] for business in sorted_businesses]
+                rating_df = pd.DataFrame({"Rating": ratings})
+                
+                if not rating_df.empty:
+                    fig = px.histogram(
+                        rating_df,
+                        x="Rating",
+                        nbins=10,
+                        title="Ratings Distribution",
+                        labels={"Rating": "Star Rating"},
+                    )
+                    fig.update_layout(yaxis_title="Count", xaxis_title="Rating")
+                    st.markdown("---")
+                    st.header("Ratings Distribution of City")
+                    st.plotly_chart(fig)
+
+            # Top 5 Restaurants by Review Count
+            if sorted_businesses:
+                sorted_by_reviews = sorted(sorted_businesses, key=lambda x: x.get("review_count", 0), reverse=True)
+                top_5 = sorted_by_reviews[:5]
+                
+                top_5_df = pd.DataFrame(
+                    [
+                        {
+                            "Name": business["name"],
+                            "Review Count": business.get("review_count", "N/A"),
+                            "Rating": business["rating"],
+                            "Price": business.get("price", "N/A"),
+                            "Address": business.get("location", {}).get("address1", "N/A"),
+                        }
+                        for business in top_5
+                    ]
+                )
+                
+                if not top_5_df.empty:
+                    st.markdown("---")
+                    st.header("Top 5 Restaurants by Review Count")
+                    st.table(top_5_df)     
+            
+            #Horizontal bar chart
+            fig = px.bar(top_5_df, x="Review Count", y="Name", orientation="h", title="Top 5 Restaurants by Review Count", text="Review Count")
+            fig.update_layout(xaxis_title="Review Count", yaxis_title="Restaurant", yaxis=dict(categoryorder="total ascending"), #Ensures the highest count is a the top
+            template="plotly_white")
+            st.plotly_chart(fig)
+
+            # Price Frequency Barchat
+            st.markdown("---")
+            st.header("Price Level Distribution in Sorted Businesses")
+
+            if sorted_businesses:
+                # Extract price levels from sorted businesses
+                price_levels = [business.get("price", "Not Available") for business in sorted_businesses]
+
+                # Create a DataFrame for price levels
+                price_counts = pd.Series(price_levels).value_counts().reset_index()
+                price_counts.columns = ["Price Level", "Frequency"]
+
+                # Colours
+                custom_colors = {
+                    "$": "green",
+                    "$$": "blue",
+                    "$$$": "orange",
+                    "$$$$": "red",
+                    "Not Available": "gray",
+                }
+
+                #Actual Chart
+                fig = px.bar(
+                    price_counts,
+                    x="Price Level",
+                    y="Frequency",
+                    title="Price Level Distribution",
+                    labels={"Price Level": "Price Level", "Frequency": "Number of Businesses"},
+                    text="Frequency",
+                    color="Price Level",
+                    color_discrete_map=custom_colors, 
+                )
+                fig.update_traces(textposition="outside")
+                fig.update_layout(
+                    xaxis_title="Price Level",
+                    yaxis_title="Frequency",
+                    title_x=0.5,
+                    template="plotly_white",
+                )
+                st.plotly_chart(fig)
+            else:
+                st.warning("No businesses found to visualize price levels.")
+
+            
+            ###### OUTPUT SECTION 
+            st.markdown("---")
+            st.header("Restaurants That Best Suit Your Selections:")
+            st.markdown("---")
+            
+            # PARSING the output into 1. Photo and 2. Restaurant Info
+            if sorted_businesses:
+                for index, business in enumerate(sorted_businesses):
+                    col1, col2 = st.columns([1, 2])
+                    
+                    # Image Column
+                    with col1:
+                        image_url = business.get('image_url')
+                        if image_url:
+                            st.image(business.get('image_url'), caption=f"{business['name']}'s profile photo") 
+                        else: 
+                            st.write("No Image Available.")
+                    
+                    # Info Column
+                    with col2:
+                        # Business name, rating, review count, price
+                        st.write(f"**{business['name']}**")
+                        st.write(f"Rating: {business['rating']}")
+                        st.write(f"Review Count: {business.get('review_count', 'Not Available')}")
+                        st.write(f"Price: {business.get('price', 'Not Available')}")
+                        
+                        # Categories:
+                        categories = ", ".join([category['title'] for category in business.get('categories', [])])
+                        st.write(f"Categories: {categories if categories else 'Not available'}")
+
+
+                        #Address
+                        address = business.get('location', {}).get('address1')
+                        if address: 
+                            st.write(f"Address: {','.join(address.splitlines())}")
+                        else: 
+                            st.write("Address: Not available")
+                        
+                        # distance
+                         # Distance from user
+                        if location_pref == "I'm specific - I'll input coordinates" and location:
+                            business_lat = business["coordinates"]["latitude"]
+                            business_lon = business["coordinates"]["longitude"]
+                            distance_from_you = calculate_distance_in_meters(lat, lon, business_lat, business_lon)
+                            st.write(f"Distance from you: {round(distance_from_you)} meters")
+
+                     # Opening Hours
+                        st.write("Opening Hours:")
+                        display_business_hours(business)
+                    # st.write(business.get('business_hours', 'Not available'))
+
+                    st.write("---")
+            else:
+                st.write("No businesses found.")
+        else:
+            st.write("No businesses found.")
+
+#####################DUO MODE############################################################################################################
+elif Options == 'Duo Mode':
+    st.image(r'https://i.postimg.cc/k4BCdcnH/LOGO.png')
+    st.title('Duo Mode')
+    st.write('Welcome to the Duo Mode!')
+    
+    # Location
+    location = st.text_input("Enter location:", "St. Gallen")
+
+    # Fetch businesses if location is provided
+    businesses = get_yelp_businesses(location)
+
+    if businesses:
+        # Extract all unique categories across the businesses
+        all_categories = set()
+        for business in businesses:
+            for category in business.get('categories', []):
+                all_categories.add(category['title'])
+
+        # Split screen into two columns for Host and Guest
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("Host Preferences")
+            host_pref = st.multiselect("Choose your dining preference:", all_categories, key="host")
+            st.write(f"Host preference: {host_pref}")
+            st.write("""Choose Your Preferred Star Rating Range:""")
+            host_rating_slider = st.slider("""NOTE that we won't provide you with restaurants rated less than 4, 
+                                        so you choose how perfect you want to be!!""",
+                            4.0, 5.0, (4.0, 5.0), step=0.1, key='host_slider')
+            st.markdown("---")
+            prices_selected_host = st.multiselect("Select Price Levels",
+                                    options=["$", "$$", "$$$", "$$$$", "Not Available"],
+                                    key='host_choice')
+            st.markdown("---")
+            st.session_state["host_pref"] = {
+                'categories': host_pref,
+                'rating_range': host_rating_slider,
+                'prices': prices_selected_host
+            }
+        with col2:
+            st.subheader("Guest Preferences")
+            guest_pref = st.multiselect("Choose your dining preference:", all_categories, key="guest")
+            st.write(f"Guest preference: {guest_pref}")  
+            st.write("""Choose Your Preferred Star Rating Range:""")
+            guest_rating_slider = st.slider("""NOTE that we won't provide you with restaurants rated less than 4, 
+                                        so you choose how perfect you want to be!!""",
+                            4.0, 5.0, (4.0, 5.0), step=0.1, key='guest_slider')
+            st.markdown("---")
+            prices_selected_guest = st.multiselect("Select Price Levels",
+                                    options=["$", "$$", "$$$", "$$$$", "Not Available"],
+                                    key='guest_choice')
+            st.markdown("---")
+            st.session_state["guest_pref"] = {
+                'categories': guest_pref,
+                'rating_range': guest_rating_slider,
+                'prices': prices_selected_guest
+            }
+
+        # Verify that host and guest preferences are fully set in session_state
+        if "host_pref" in st.session_state and "guest_pref" in st.session_state:
+            host_pref = st.session_state["host_pref"]
+            guest_pref = st.session_state["guest_pref"]
+
+            # Ensure all keys are present in host and guest preferences
+            required_keys = ["categories", "rating_range", "prices"]
+            if all(key in host_pref for key in required_keys) and all(key in guest_pref for key in required_keys):
+                # Extract host and guest preferences
+                host_categories = host_pref['categories']
+                guest_categories = guest_pref['categories']
+                host_min_rating, host_max_rating = host_pref['rating_range']
+                guest_min_rating, guest_max_rating = guest_pref['rating_range']
+                prices_selected_host = host_pref['prices']
+                prices_selected_guest = guest_pref['prices']
+
+                # Proceed with filtering or other logic
+                st.write(f"Host preferences: Categories={host_categories},Rating={host_min_rating}-{host_max_rating},Prices={prices_selected_host}")
+                st.write(f"Guest preferences: Categories={guest_categories},Rating={guest_min_rating}-{guest_max_rating},Prices={prices_selected_guest}")
+            else:
+                st.error("Keys missing")
+        else:
+            st.error("Session state error")
+
+        matching_restaurants = [
+            business for business in businesses
+            if (
+                any(category['title'].lower() in [cat.lower() for cat in host_categories] for category in business.get('categories', [])) and
+                any(category['title'].lower() in [cat.lower() for cat in guest_categories] for category in business.get('categories', [])) and
+                host_min_rating <= business.get("rating", 0) <= host_max_rating and
+                guest_min_rating <= business.get("rating", 0) <= guest_max_rating and
+                business.get('price', 'Not Available') in prices_selected_host and
+                business.get('price', 'Not Available') in prices_selected_guest
+            )
+        ]
+        st.write(f"Matching restaurants found: {len(matching_restaurants)}")
+        
+        if matching_restaurants:         
+            for business in matching_restaurants:
+                # Create a row with two columns for each business
+                col1, col2 = st.columns([1, 2])
+
+                # Display the image in col1
+                with col1:
+                    image_url = business.get('image_url')
+                    if image_url:
+                        st.image(image_url, caption=f"{business['name']}'s profile photo")  
+                    else: 
+                        st.write("No Image Available.")
+
+                # Display the text details about the restaurants in col2
+                with col2:
+                    st.markdown(f"### {business['name']}")
+                    st.markdown(f"**Rating**: {business['rating']}")
+                    st.markdown(f"**Price**: {business.get('price', 'Not available')}")
+                    st.markdown(f"**Categories**: {', '.join([category['title'] for category in business.get('categories', [])])}")
+                    st.markdown(f"**Address**: {business.get('location', {}).get('address1', 'Not available')}")
+
+                # Add a separator between businesses
+                st.markdown("---")
+        else:
+            st.write("No businesses match both preferences.")
+
+        # Display opening hours and filter by matching times
+        if matching_restaurants:
+            # Add a slider for Host and Guest to select a preffered time
+            st.markdown("---")
+            st.subheader("Set Your Preferred Dining Time Range:")
+            time_range = st.slider("Dining Time Range:", value=(time(18, 0), time(22, 0)))
+            
+
+            # Convert time range to 24-hour format for comparison
+            def time_to_minutes(time_obj):
+                return time_obj.hour * 60 + time_obj.minute
+
+            start, end = map(time_to_minutes, time_range)
+            
+
+            # Filter restaurants that match the time preferences
+            filtered_restaurants = []
+            for business in matching_restaurants:
+                business_hours = business.get('business_hours', [])
+                if business_hours and 'open' in business_hours[0]:
+                    for entry in business_hours[0]['open']:
+                        start_minutes = int(entry['start'][:2]) * 60 + int(entry['start'][2:])
+                        end_minutes = int(entry['end'][:2]) * 60 + int(entry['end'][2:])
+                        
+                        #Handle overnight times
+                        if end_minutes < start_minutes:
+                            end_minutes += 24 * 60
+
+                        # Check if time range overlaps with both Host and Guest preferences
+                        if (start <= end_minutes and end >= start_minutes):
+                            filtered_restaurants.append(business)
+                            break
+
+            st.write(f"Filtered restaurants matching your time preferences: {len(filtered_restaurants)}")
+
+            # Display filtered restaurants
+            if filtered_restaurants:
+                for business in filtered_restaurants:
+                    st.markdown(f"### {business['name']}")
+                    st.write(f"**Rating:** {business['rating']}")
+                    st.write(f"**Price:** {business.get('price', 'Not available')}")
+                    st.write(f"**Categories:** {', '.join([category['title'] for category in business.get('categories', [])])}")
+                    st.write(f"**Address:** {business.get('location', {}).get('address1', 'Not available')}")
+                    st.write("**Opening Hours:**")
+                    
+                    # Display business hours in a clean format
+                    display_business_hours(business)
+
+                    st.markdown("---")
+
+                # Add Category Distribution Visualization
+                st.markdown("---")
+                st.header("Category Distribution for Selected Restaurants")
+
+                # Count categories
+                category_counts = {}
+                for business in filtered_restaurants:
+                    for category in business.get("categories", []):
+                        category_name = category['title']
+                        category_counts[category_name] = category_counts.get(category_name, 0) + 1
+
+                # Prepare data for the pie chart
+                category_df = pd.DataFrame({
+                    "Category": list(category_counts.keys()),
+                    "Count": list(category_counts.values())
+                })
+
+                # Group categories smaller than 2% into "Others"
+                total_count = category_df["Count"].sum()
+                category_df["Percentage"] = (category_df["Count"] / total_count) * 100
+                category_df["Category"] = category_df.apply(lambda row: "Others" if row["Percentage"] < 2 else row["Category"], axis=1)
+                category_df = category_df.groupby("Category", as_index=False).agg({"Count": "sum"})
+
+                # Plot the pie chart
+                if not category_df.empty:
+                    fig = px.pie(
+                        category_df,
+                        values="Count",
+                        names="Category",
+                        title="Category Distribution",
+                        hole=0.4
+                    )
+                    st.plotly_chart(fig)
+            else:
+                st.write("No restaurants match your time preferences.")
+        else:
+            st.write("No matching restaurants found.")
+                  
+############## MACHINE LEARNING ##########################################
+elif Options == 'Find Tonight\'s Cuisine!':
+    st.image(r'https://i.postimg.cc/k4BCdcnH/LOGO.png')
+    st.title("Find Your Cuisine")
+    st.write("Not Sure what to Eat Tonight? Let our Machine Learning algorithm give you a suggestion!!")
+     
+    
+    #get the path
+
+
+    # Get the current working directory
+    script_directory = os.getcwd()
+
+    # Construct the CSV file path
+    csv_path = os.path.join(script_directory, 'updated_survey_data.csv')
+
+    try:
+        # Read the CSV file
+        data = pd.read_csv(csv_path)
+        st.write("Data Loaded Successfully:")
+        st.dataframe(data)  # Display the data in Streamlit
+    except FileNotFoundError:
+        st.error(f"File not found: {csv_path}")
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+
+    
+    #### VISUALIZATIONS ####
+    st.header('Visualizations of The Dataset')
+    def plot_heatmap(df, index, columns, title, cmap):
+        heatmap_data = df.groupby([index, columns]).size().unstack(fill_value=0)
+        fig, ax = plt.subplots(figsize=(12, 8))
+        sns.heatmap(heatmap_data, annot=True, fmt='d', cmap=cmap, cbar_kws={'label': 'Count'}, ax=ax)
+        ax.set_title(title, fontsize=16)
+        ax.set_xlabel(columns, fontsize=14)
+        ax.set_ylabel(index, fontsize=14)
+        plt.tight_layout()
+        return fig
+    
+    viz = st.radio("I wish to see Visualizations of Cuisine Against", ('Star Rating', 'Ambiance', 'Craving', 'Company', 'No Visualization'), index=4)
+    
+    if viz == 'Star Rating':
+        fig1 = plot_heatmap(data, 'Cuisines', 'Star Rating', 'Heatmap of Cuisine vs Star Rating', 'YlGnBu')
+        st.pyplot(fig1)
+
+    if viz == 'Ambiance': 
+        fig2 = plot_heatmap(data, 'Cuisines', 'Ambiance', 'Heatmap of Cuisine vs Ambiance', 'YlGnBu')
+        st.pyplot(fig2)
+    
+    if viz == 'Craving': 
+        fig3 = plot_heatmap(data, 'Cuisines', 'Craving', 'Heatmap of Cuisine vs Craving', 'Oranges')
+        st.pyplot(fig3)
+    
+    if viz == 'Company':
+        fig4 = plot_heatmap(data, 'Cuisines', 'Company', 'Heatmap of Cuisine vs Company', 'Blues')
+        st.pyplot(fig4)
+    
+    if viz == 'No Visualization':
+        st.write('No Visualization Selected')
+
+    # Initialize Encoding Categorical Variables
+    encoder = {}
+    for column in data.columns:
+        if data[column].dtype == 'object':
+            encoder[column] = LabelEncoder()
+            data[column] = encoder[column].fit_transform(data[column])
+
+    # Split into feature and target variables
+    X = data.drop(columns=['Cuisines'])
+    y = data['Cuisines']
+
+    # Split into training and testing datasets
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Train KNN Classifier
+    knn = KNeighborsClassifier(n_neighbors=5)
+    knn.fit(X_train, y_train)
+
+    # Model Evaluation
+    y_pred = knn.predict(X_test)
+    model = knn 
+
+    ###### STREAMLIT INTERFACE ######
+    st.title("Cuisine Predictor")
+    st.write("Enter your preferences to predict the cuisine!")
+
+    # User Inputs
+    budget_amount = st.selectbox("Budget ($ to $$$):", ['$', '$$', '$$$'])
+    star_rating = st.selectbox("Preferred Star Rating:", ['3+', '4+', '5'])
+    time_of_day = st.selectbox("Time of Day you will be eating:", ['Morning', 'Midday', 'Evening', 'Night'])
+    ambiance = st.selectbox("Ambiance Preference:", ['Quiet', 'Atmospheric', 'Buzzing', 'Electric'])
+    company = st.slider("Number of Companions:", 0, 4, 1)
+    craving = st.selectbox("Craving Type:", ['Savoury', 'Both', 'Sweet'])
+
+    # Encode user input to match the model
+    user_data = pd.DataFrame({
+        'Budget': [encoder['Budget'].transform([budget_amount])[0]],
+        'Star Rating': [encoder['Star Rating'].transform([star_rating])[0]],
+        'Ambiance': [encoder['Ambiance'].transform([ambiance])[0]],
+        'Craving': [encoder['Craving'].transform([craving])[0]],
+        'Company': [company],
+        'Time': [encoder['Time'].transform([time_of_day])[0]]
+    })
+
+    # Prediction
+    if st.button("Predict Cuisine"):
+        prediction = model.predict(user_data)
+        cuisine = encoder['Cuisines'].inverse_transform(prediction)
+        st.success(f"The predicted cuisine is: {cuisine[0]}")
